@@ -78,7 +78,7 @@ export class ChatService {
         messages: [
           {
             role: 'system',
-            content: 'You are a knowledgeable real estate assistant. Help users with their real estate related queries.',
+            content: 'You are a knowledgeable real estate assistant. Resolve user queries related to real estate. Help the users with buy, sell, purchase and rent of properties.',
           },
           ...messages,
           { role: 'user', content: userMessage },
