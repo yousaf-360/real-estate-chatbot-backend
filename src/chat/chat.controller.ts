@@ -1,14 +1,24 @@
-import { Controller, Get, Post, Param, Sse, Query } from '@nestjs/common';
+import { Controller, Get, Post, Param, Sse, Query,Body,Res } from '@nestjs/common';
 import { ChatService } from './chat.service';
 import { Observable } from 'rxjs';
+import { from } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+type CustomMessageEvent = {
+  data: { type: string; content?: any; fullMessage?: string; chatId?: string };
+  type: string;
+  lastEventId: string;
+  origin: string;
+};
 
 @Controller('chat')
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
 
-  @Post()
+  @Post('create')
   async createChat() {
-    return await this.chatService.createChat();
+    const chatId = await this.chatService.createChat();
+    return { chatId };
   }
 
   @Get()
@@ -21,52 +31,54 @@ export class ChatController {
     return await this.chatService.getChatMessages(chatId);
   }
 
-  @Sse('stream')
+  @Post(':chatId/message')
+  @Sse()
   async streamChat(
-    @Query('message') message: string,
-    @Query('chatId') chatId: string,
-  ): Promise<Observable<MessageEvent>> {
-    return new Observable((subscriber) => {
-      const stream = this.chatService.streamChatResponse(chatId, message);
-      let fullResponse = '';
+    @Param('chatId') chatId: string,
+    @Body() body: { message: string },
+    @Res() response: Response
+  ): Promise<Observable<CustomMessageEvent>> {
+    console.log(`Chat ID: ${chatId}, Message: ${body.message}`);
+    let fullMessage = '';
+    
+    const stream = await this.chatService.streamChatResponse(body.message, chatId);
 
-      stream.then(async (response) => {
-        for await (const chunk of response) {
-          const content = chunk.choices[0]?.delta?.content;
-          if (content) {
-            fullResponse += content;
-            subscriber.next({ 
-              data: { 
-                content,
-                type: 'chunk'
-              },
-              type: 'message',
-              id: String(Date.now()),
-            } as unknown as MessageEvent);
-          }
+    return from(stream).pipe(
+      map((chunk): CustomMessageEvent => {
+        console.log('Chunk:', chunk.choices[0].delta);
+        
+        if (chunk.choices[0].delta.content) {
+          fullMessage += chunk.choices[0].delta.content;
         }
         
-        // Send complete response
-        subscriber.next({ 
-          data: { 
-            content: fullResponse,
-            type: 'complete'
+        if (!chunk.choices[0].delta.content && !chunk.choices[0].delta.tool_calls) {
+          console.log('Full message:', fullMessage);
+          this.chatService.storeMessage({
+            chat_id: chatId,
+            content: fullMessage,
+            role: 'assistant'
+          });
+        }
+
+        return {
+          data: {
+            type: chunk.choices[0].delta.tool_calls ? 'tool_calls' : 
+                  chunk.choices[0].delta.content ? 'content' : 'done',
+            content: chunk.choices[0].delta.tool_calls || chunk.choices[0].delta.content,
+            fullMessage: !chunk.choices[0].delta.content && !chunk.choices[0].delta.tool_calls ? fullMessage : undefined
           },
           type: 'message',
-          id: String(Date.now()),
-        } as unknown as MessageEvent);
+          lastEventId: '',
+          origin: ''
+        };
+      })
+    );
+  }
 
-        // Store the complete assistant response
-        await this.chatService.storeMessage({
-          chat_id: chatId,
-          content: fullResponse,
-          role: 'assistant',
-        });
-
-        subscriber.complete();
-      }).catch((error) => {
-        subscriber.error(error);
-      });
-    });
+  @Post('tool-response')
+  async handleToolResponse(
+    @Body() body: { toolCalls: any[] }
+  ) {
+    return this.chatService.handleToolCalls(body.toolCalls);
   }
 }
